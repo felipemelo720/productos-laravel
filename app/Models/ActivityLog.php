@@ -7,6 +7,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ActivityLog extends Model
 {
+    // activity_logs (legacy schema) has no updated_at column
+    const UPDATED_AT = null;
+
     protected $fillable = [
         'user_id', 'user_name', 'action', 'entity_type',
         'entity_id', 'entity_name', 'details', 'ip_address'

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Product;
+use App\Models\ProductBrand;
 use App\Models\ProductCategory;
 use App\Models\ProductTag;
 use App\Models\ProductAttribute;
@@ -19,11 +20,6 @@ use Illuminate\Support\Facades\Log;
 
 class ProductController extends Controller
 {
-    public function __construct()
-    {
-        $this->middleware('auth');
-    }
-
     public function index(Request $request)
     {
         $query = Product::query();
@@ -45,76 +41,222 @@ class ProductController extends Controller
             $query->where('status', $request->status);
         }
 
-        $products = $query->paginate(20);
+        $products = $query->orderByDesc('id')->with(['images' => fn($q) => $q->where('is_primary', true)->limit(1)])->paginate(20);
         return view('products.index', compact('products'));
     }
 
     public function create()
     {
-        $categories = ProductCategory::all();
-        $tags = ProductTag::all();
-        $attributes = ProductAttribute::all();
-        return view('products.create', compact('categories', 'tags', 'attributes'));
+        $attributeNames = ProductAttribute::select('name')->distinct()->orderBy('name')->pluck('name');
+        $wcBrands       = ProductBrand::orderBy('name')->get();
+        $wcCategories   = ProductCategory::orderBy('name')->get();
+        $wcTags         = ProductTag::orderBy('name')->get();
+        return view('products.create', compact('attributeNames', 'wcBrands', 'wcCategories', 'wcTags'));
     }
 
-    public function store(Request $request)
+    public function store(Request $request, ImageUploadService $imageService)
     {
         $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'sku' => 'required|string|unique:products',
-            'type' => 'required|in:simple,variable',
-            'regular_price' => 'required|numeric|min:0',
-            'sale_price' => 'nullable|numeric|min:0',
-            'description' => 'nullable|string',
-            'short_description' => 'nullable|string',
-            'brand' => 'nullable|string',
-            'custom_tags' => 'nullable|string',
-            'status' => 'required|in:draft,published,private',
+            'name'             => 'required|string|max:255',
+            'sku'              => 'required|string|unique:products',
+            'description'      => 'nullable|string',
+            'short_description'=> 'nullable|string',
+            'brand'            => 'nullable|string',
+            'wc_brand_id'      => 'nullable|integer',
+            'custom_tags'      => 'nullable|string',
+            'categories'       => 'nullable|array',
+            'categories.*'     => 'integer',
+            'tags'             => 'nullable|array',
+            'tags.*'           => 'integer',
+            'images'           => 'nullable|array',
+            'images.*'         => 'image|max:5120',
+            'attributes'       => 'nullable|array',
+            'attributes.*.name'  => 'required_with:attributes.*.value|nullable|string|max:255',
+            'attributes.*.value' => 'required_with:attributes.*.name|nullable|string|max:255',
         ]);
 
-        $validated['slug'] = Str::slug($validated['name']);
+        $attributes         = $validated['attributes'] ?? [];
+        $incomingCategories = $validated['categories'] ?? [];
+        $incomingTags       = $validated['tags'] ?? [];
+        unset($validated['attributes'], $validated['categories'], $validated['tags']);
+
+        // Resolve brand name from wc_brand_id if provided
+        if (!empty($validated['wc_brand_id'])) {
+            $brand = ProductBrand::where('wc_brand_id', $validated['wc_brand_id'])->first();
+            if ($brand) {
+                $validated['brand'] = $brand->name;
+            }
+        }
+
+        $validated['status']     = 'published';
+        $validated['type']       = 'simple';
+        $validated['slug']       = $this->uniqueSlug($validated['name']);
         $validated['created_by'] = auth()->id();
 
         $product = Product::create($validated);
+
+        if (!empty($incomingCategories)) {
+            $product->categories()->sync($incomingCategories);
+        }
+
+        if (!empty($incomingTags)) {
+            $tagData = ProductTag::whereIn('id', $incomingTags)->get()
+                ->mapWithKeys(fn($t) => [$t->id => ['tag_name' => $t->name]]);
+            $product->tags()->sync($tagData);
+        }
+
+        foreach ($attributes as $attr) {
+            if (empty($attr['name']) || empty($attr['value'])) {
+                continue;
+            }
+            $product->attributes()->create([
+                'name' => trim($attr['name']),
+                'value' => trim($attr['value']),
+            ]);
+        }
+
+        if ($request->hasFile('images')) {
+            foreach ($request->file('images') as $index => $file) {
+                $isPrimary = $index === 0;
+                $path = $imageService->uploadProductImage($product->id, $file, $isPrimary);
+                $product->images()->create([
+                    'image_path' => $path,
+                    'is_primary' => $isPrimary,
+                    'sort_order' => $index,
+                ]);
+            }
+        }
+
         $this->createVersion($product, 'create', 'Product created');
 
-        return redirect()->route('products.show', $product)->with('success', 'Product created');
+        return redirect()->route('products.show', $product)->with('success', 'Producto creado');
+    }
+
+    private function uniqueSlug(string $name): string
+    {
+        $base = Str::slug($name) ?: 'producto';
+        $slug = $base;
+        $i = 2;
+        while (Product::where('slug', $slug)->exists()) {
+            $slug = "{$base}-{$i}";
+            $i++;
+        }
+        return $slug;
     }
 
     public function show(Product $product)
     {
         $this->authorize('view', $product);
+        $product->load([
+            'images' => fn($q) => $q->orderByDesc('is_primary')->orderBy('sort_order'),
+            'attributes',
+            'categories',
+            'tags',
+        ]);
         return view('products.show', compact('product'));
     }
 
     public function edit(Product $product)
     {
         $this->authorize('update', $product);
-        $categories = ProductCategory::all();
-        $tags = ProductTag::all();
-        $attributes = ProductAttribute::all();
-        return view('products.edit', compact('product', 'categories', 'tags', 'attributes'));
+        $product->load('attributes', 'categories', 'tags');
+        $attributeNames = ProductAttribute::select('name')->distinct()->orderBy('name')->pluck('name');
+        $wcCategories   = ProductCategory::orderBy('name')->get();
+        $wcBrands       = ProductBrand::orderBy('name')->get();
+        $wcTags         = ProductTag::orderBy('name')->get();
+        return view('products.edit', compact('product', 'attributeNames', 'wcCategories', 'wcBrands', 'wcTags'));
     }
 
-    public function update(Request $request, Product $product)
+    public function update(Request $request, Product $product, ImageUploadService $imageService)
     {
         $this->authorize('update', $product);
 
         $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'sku' => "required|string|unique:products,sku,{$product->id}",
-            'type' => 'required|in:simple,variable',
-            'regular_price' => 'required|numeric|min:0',
-            'sale_price' => 'nullable|numeric|min:0',
-            'description' => 'nullable|string',
-            'short_description' => 'nullable|string',
-            'brand' => 'nullable|string',
-            'custom_tags' => 'nullable|string',
-            'status' => 'required|in:draft,published,private',
+            'name'             => 'required|string|max:255',
+            'sku'              => "required|string|unique:products,sku,{$product->id}",
+            'description'      => 'nullable|string',
+            'short_description'=> 'nullable|string',
+            'brand'            => 'nullable|string',
+            'wc_brand_id'      => 'nullable|integer',
+            'custom_tags'      => 'nullable|string',
+            'categories'       => 'nullable|array',
+            'categories.*'     => 'integer',
+            'tags'             => 'nullable|array',
+            'tags.*'           => 'integer',
+            'images'           => 'nullable|array',
+            'images.*'         => 'image|max:5120',
+            'delete_images'    => 'nullable|array',
+            'delete_images.*'  => 'integer',
+            'attributes'       => 'nullable|array',
+            'attributes.*.name'  => 'required_with:attributes.*.value|nullable|string|max:255',
+            'attributes.*.value' => 'required_with:attributes.*.name|nullable|string|max:255',
         ]);
+
+        $incomingAttributes = $validated['attributes'] ?? [];
+        $incomingCategories = $validated['categories'] ?? [];
+        $incomingTags       = $validated['tags'] ?? [];
+        unset($validated['attributes'], $validated['categories'], $validated['tags']);
+
+        // Resolve brand name from wc_brand_id if provided
+        if (!empty($validated['wc_brand_id'])) {
+            $brand = ProductBrand::where('wc_brand_id', $validated['wc_brand_id'])->first();
+            if ($brand) {
+                $validated['brand'] = $brand->name;
+            }
+        }
 
         $validated['slug'] = Str::slug($validated['name']);
         $product->update($validated);
+
+        // Sync categories
+        $product->categories()->sync($incomingCategories);
+
+        // Sync tags
+        $tagPivot = [];
+        foreach ($incomingTags as $tagId) {
+            $tag = ProductTag::find($tagId);
+            if ($tag) {
+                $tagPivot[$tagId] = ['tag_name' => $tag->name, 'is_custom' => false];
+            }
+        }
+        $product->tags()->sync($tagPivot);
+
+        $product->attributes()->delete();
+        foreach ($incomingAttributes as $attr) {
+            if (empty($attr['name']) || empty($attr['value'])) {
+                continue;
+            }
+            $product->attributes()->create([
+                'name' => trim($attr['name']),
+                'value' => trim($attr['value']),
+            ]);
+        }
+
+        if ($request->filled('delete_images')) {
+            $toDelete = $product->images()->whereIn('id', $request->delete_images)->get();
+            foreach ($toDelete as $img) {
+                $imageService->deleteProductImage($img->image_path);
+                $img->delete();
+            }
+            if (!$product->images()->where('is_primary', true)->exists()) {
+                $product->images()->oldest()->limit(1)->update(['is_primary' => true]);
+            }
+        }
+
+        if ($request->hasFile('images')) {
+            $hasPrimary = $product->images()->where('is_primary', true)->exists();
+            foreach ($request->file('images') as $index => $file) {
+                $isPrimary = !$hasPrimary && $index === 0;
+                $path = $imageService->uploadProductImage($product->id, $file, $isPrimary);
+                $product->images()->create([
+                    'image_path' => $path,
+                    'is_primary' => $isPrimary,
+                    'order'      => $product->images()->count(),
+                ]);
+                if ($isPrimary) $hasPrimary = true;
+            }
+        }
+
         $this->createVersion($product, 'update', 'Product updated');
 
         return redirect()->route('products.show', $product)->with('success', 'Product updated');
@@ -134,6 +276,7 @@ class ProductController extends Controller
 
         $newProduct = $product->replicate();
         $newProduct->slug = Str::slug($product->name . ' copy-' . time());
+        $newProduct->sku = $product->sku . '-copia-' . time();
         $newProduct->wc_product_id = null;
         $newProduct->save();
 
@@ -144,29 +287,42 @@ class ProductController extends Controller
         foreach ($product->variations as $variation) {
             $newProduct->variations()->create($variation->only(['sku', 'regular_price', 'sale_price', 'image_path', 'is_default']));
         }
-        $newProduct->attributes()->attach($product->attributes);
+        foreach ($product->attributes as $attribute) {
+            $newProduct->attributes()->create($attribute->only(['name', 'value', 'wc_attribute_id', 'wc_term_id']));
+        }
 
         $this->createVersion($newProduct, 'duplicate', 'Duplicated from product #' . $product->id);
 
-        return redirect()->route('products.show', $newProduct)->with('success', 'Product duplicated');
+        return redirect()->route('products.show', $newProduct)
+            ->with('success', 'Producto duplicado correctamente.')
+            ->with('warning', 'El SKU fue modificado automáticamente, recuerda actualizarlo.');
+    }
+
+    public function export(Product $product, WooCommerceService $wc)
+    {
+        $response = $this->createInWoocommerce($product, $wc);
+        $data = $response->getData(true);
+
+        if (!empty($data['success'])) {
+            return redirect()->route('products.show', $product)->with('success', $data['message'] ?? 'Product exported to WooCommerce');
+        }
+
+        return redirect()->back()->with('error', $data['message'] ?? 'Export failed');
     }
 
     public function createInWoocommerce(Product $product, WooCommerceService $wc): JsonResponse
     {
         $this->authorize('update', $product);
 
+        $product->load('images', 'attributes', 'categories', 'tags');
+
         try {
             $payload = $this->buildWCPayload($product);
 
-            // Upload images
-            if ($product->images()->exists()) {
-                $payload['images'] = [];
-                foreach ($product->images as $image) {
-                    $media = $wc->uploadMedia($image->image_path, basename($image->image_path));
-                    if ($media) {
-                        $payload['images'][] = ['id' => $media['id']];
-                    }
-                }
+            if ($product->images->isNotEmpty()) {
+                $payload['images'] = $product->images->map(fn($image) => [
+                    'src' => url($image->image_path),
+                ])->toArray();
             }
 
             // Create or update
@@ -310,6 +466,59 @@ class ProductController extends Controller
         }
     }
 
+    public function syncWooCommerceData(WooCommerceService $wc): JsonResponse
+    {
+        try {
+            $categories = $wc->getCategories();
+            $catCount = 0;
+            if ($categories) {
+                foreach ($categories as $item) {
+                    ProductCategory::updateOrCreate(
+                        ['wc_category_id' => $item['id']],
+                        ['name' => $item['name']]
+                    );
+                }
+                $catCount = count($categories);
+            }
+
+            $brands = $wc->getBrands();
+            $brandCount = 0;
+            if ($brands) {
+                foreach ($brands as $item) {
+                    ProductBrand::updateOrCreate(
+                        ['wc_brand_id' => $item['id']],
+                        ['name' => $item['name'], 'slug' => $item['slug'] ?? null]
+                    );
+                }
+                $brandCount = count($brands);
+            }
+
+            $tags = $wc->getTags();
+            $tagCount = 0;
+            if ($tags) {
+                foreach ($tags as $item) {
+                    ProductTag::updateOrCreate(
+                        ['wc_tag_id' => $item['id']],
+                        ['name' => $item['name']]
+                    );
+                }
+                $tagCount = count($tags);
+            }
+
+            \Illuminate\Support\Facades\Cache::forget('wc_categories');
+            \Illuminate\Support\Facades\Cache::forget('wc_brands');
+            \Illuminate\Support\Facades\Cache::forget('wc_tags');
+
+            return response()->json([
+                'success' => true,
+                'message' => "Sincronizado: {$catCount} categorías, {$brandCount} marcas, {$tagCount} etiquetas",
+            ]);
+        } catch (\Exception $e) {
+            Log::error("WC Sync failed: {$e->getMessage()}");
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 400);
+        }
+    }
+
     public function optimizeImages(Product $product, ImagifyService $imagify): JsonResponse
     {
         $this->authorize('update', $product);
@@ -330,7 +539,7 @@ class ProductController extends Controller
     private function buildWCPayload(Product $product): array
     {
         $payload = [
-            'name' => $product->name,
+            'name' => $product->brand ? "{$product->name} - {$product->brand}" : $product->name,
             'sku' => $product->sku,
             'type' => $product->type,
             'status' => $product->status === 'published' ? 'publish' : 'draft',
@@ -343,12 +552,30 @@ class ProductController extends Controller
             $payload['sale_price'] = (string)$product->sale_price;
         }
 
-        if ($product->categories()->exists()) {
+        if ($product->categories->isNotEmpty()) {
             $payload['categories'] = $product->categories->map(fn($c) => ['id' => $c->wc_category_id])->toArray();
         }
 
-        if ($product->tags()->exists()) {
+        if ($product->tags->isNotEmpty()) {
             $payload['tags'] = $product->tags->map(fn($t) => ['id' => $t->wc_tag_id])->toArray();
+        }
+
+        if ($product->attributes->isNotEmpty()) {
+            $isVariable = $product->type === 'variable';
+            $payload['attributes'] = $product->attributes
+                ->groupBy(fn($a) => strtolower(trim($a->name)))
+                ->map(fn($group) => [
+                    'name'      => $group->first()->name,
+                    'options'   => $group->pluck('value')->filter()->values()->toArray(),
+                    'visible'   => true,
+                    'variation' => $isVariable,
+                ])
+                ->values()
+                ->toArray();
+        }
+
+        if ($product->wc_brand_id) {
+            $payload['brands'] = [['id' => $product->wc_brand_id]];
         }
 
         return $payload;
@@ -374,11 +601,11 @@ class ProductController extends Controller
             'type' => $product->type,
             'custom_tags' => $product->custom_tags,
             'internal_observation' => $product->internal_observation,
-            'categories_json' => $product->categories->map(fn($c) => $c->only('id', 'name'))->toJson(),
-            'attributes_json' => $product->attributes->map(fn($a) => $a->only('id', 'name', 'value'))->toJson(),
-            'images_json' => $product->images->map(fn($i) => $i->only('image_path', 'is_primary'))->toJson(),
-            'variations_json' => $product->variations->map(fn($v) => $v->only('sku', 'regular_price', 'sale_price'))->toJson(),
-            'wc_tags_json' => $product->tags->map(fn($t) => $t->only('id', 'name'))->toJson(),
+            'categories_json' => rescue(fn() => $product->categories->map(fn($c) => $c->only('id', 'name'))->toJson(), '[]', false),
+            'attributes_json' => rescue(fn() => $product->attributes->map(fn($a) => $a->only('id', 'name', 'value'))->toJson(), '[]', false),
+            'images_json' => rescue(fn() => $product->images->map(fn($i) => $i->only('image_path', 'is_primary'))->toJson(), '[]', false),
+            'variations_json' => rescue(fn() => $product->variations->map(fn($v) => $v->only('sku', 'regular_price', 'sale_price'))->toJson(), '[]', false),
+            'wc_tags_json' => rescue(fn() => $product->tags->map(fn($t) => $t->only('id', 'name'))->toJson(), '[]', false),
             'change_type' => $changeType,
             'change_description' => $changeDescription,
             'created_by' => auth()->id(),

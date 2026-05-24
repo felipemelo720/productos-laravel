@@ -7,6 +7,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ProductVersion extends Model
 {
+    // product_versions (legacy schema) has no updated_at column
+    const UPDATED_AT = null;
+
     protected $fillable = [
         'product_id', 'version_number', 'name', 'slug', 'short_description',
         'description', 'regular_price', 'sale_price', 'sku', 'brand', 'status',

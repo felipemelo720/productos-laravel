@@ -11,9 +11,10 @@ class Product extends Model
 {
     protected $fillable = [
         'name', 'slug', 'short_description', 'description',
-        'regular_price', 'sale_price', 'sku', 'brand',
+        'regular_price', 'sale_price', 'sku', 'brand', 'wc_brand_id',
         'custom_tags', 'status', 'type', 'wc_product_id',
-        'created_by', 'internal_observation'
+        'created_by', 'internal_observation',
+        'wc_publication_status', 'wc_status_checked_at',
     ];
 
     protected $casts = [
@@ -38,18 +39,23 @@ class Product extends Model
 
     public function categories(): BelongsToMany
     {
-        return $this->belongsToMany(ProductCategory::class);
+        return $this->belongsToMany(ProductCategory::class, 'product_categories_map', 'product_id', 'category_id');
     }
 
     public function tags(): BelongsToMany
     {
-        return $this->belongsToMany(ProductTag::class);
+        return $this->belongsToMany(ProductTag::class, 'product_tags_map', 'product_id', 'tag_id');
     }
 
-    public function attributes(): BelongsToMany
+    public function wcBrand(): \Illuminate\Database\Eloquent\Relations\BelongsTo
     {
-        return $this->belongsToMany(ProductAttribute::class, 'product_attribute')
-            ->withPivot('value', 'wc_term_id');
+        return $this->belongsTo(ProductBrand::class, 'wc_brand_id', 'wc_brand_id');
+    }
+
+    public function attributes(): HasMany
+    {
+        // Legacy schema: product_attributes is a per-product row table (name/value), not a pivot
+        return $this->hasMany(ProductAttribute::class);
     }
 
     public function exportLogs(): HasMany

@@ -7,6 +7,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ExportLog extends Model
 {
+    const UPDATED_AT = null;
+
     protected $fillable = [
         'product_id', 'product_name', 'user_id', 'user_name',
         'status', 'error_msg', 'attempts', 'wc_product_id'

@@ -44,7 +44,7 @@ class WooCommerceService
     public function getBrands()
     {
         return Cache::remember('wc_brands', 3600, function () {
-            return $this->get('/products/attributes/2/terms', ['per_page' => 100]);
+            return $this->get('/products/brands', ['per_page' => 100]);
         });
     }
 
@@ -75,7 +75,7 @@ class WooCommerceService
 
     public function uploadMedia(string $filePath, string $fileName)
     {
-        return $this->postFile('/media', $filePath, $fileName);
+        return $this->postFile($filePath, $fileName);
     }
 
     private function get(string $endpoint, array $params = [])
@@ -93,9 +93,10 @@ class WooCommerceService
         return $this->request('PUT', $endpoint, data: $data);
     }
 
-    private function postFile(string $endpoint, string $filePath, string $fileName)
+    private function postFile(string $filePath, string $fileName)
     {
-        $url = "{$this->baseUrl}/wp-json/wc/v3{$endpoint}";
+        // WordPress media API lives at wp/v2/media, not wc/v3
+        $url = "{$this->baseUrl}/wp-json/wp/v2/media";
         $url = $this->addAuth($url);
 
         for ($attempt = 0; $attempt < $this->maxRetries; $attempt++) {

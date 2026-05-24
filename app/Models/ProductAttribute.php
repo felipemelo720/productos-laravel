@@ -3,15 +3,16 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ProductAttribute extends Model
 {
-    protected $fillable = ['name', 'wc_attribute_id'];
+    protected $fillable = [
+        'product_id', 'name', 'value', 'wc_attribute_id', 'wc_term_id',
+    ];
 
-    public function products(): BelongsToMany
+    public function product(): BelongsTo
     {
-        return $this->belongsToMany(Product::class, 'product_attribute')
-            ->withPivot('value', 'wc_term_id');
+        return $this->belongsTo(Product::class);
     }
 }

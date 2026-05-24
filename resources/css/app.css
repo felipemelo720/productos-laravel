@@ -8,4 +8,18 @@
 @theme {
     --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
         'Segoe UI Symbol', 'Noto Color Emoji';
+    --color-brand-50: #f0fafa;
+    --color-brand-500: #31A6A8;
+    --color-brand-600: #2a8f91;
+}
+
+.btn-brand {
+    background-color: var(--color-brand-500);
+    color: white;
+    font-weight: 500;
+    transition: background-color 0.15s ease;
+}
+
+.btn-brand:hover {
+    background-color: var(--color-brand-600);
 }
