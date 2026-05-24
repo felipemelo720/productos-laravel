@@ -13,10 +13,12 @@ use App\Services\WooCommerceService;
 use App\Services\ImageUploadService;
 use App\Services\OpenAIService;
 use App\Services\ImagifyService;
+use App\Mail\ProductSentMail;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 
 class ProductController extends Controller
 {
@@ -316,6 +318,8 @@ class ProductController extends Controller
 
         $product->load('images', 'attributes', 'categories', 'tags');
 
+        $action = $product->wc_product_id ? 'updated' : 'created';
+
         try {
             $payload = $this->buildWCPayload($product);
 
@@ -367,6 +371,8 @@ class ProductController extends Controller
                 'status' => 'exitoso',
                 'wc_product_id' => $wcId,
             ]);
+
+            $this->notifyProductSent($product, $action, $wcId);
 
             return response()->json(['success' => true, 'message' => 'Product exported to WooCommerce']);
         } catch (\Exception $e) {
@@ -579,6 +585,28 @@ class ProductController extends Controller
         }
 
         return $payload;
+    }
+
+    private function notifyProductSent(Product $product, string $action, int $wcProductId): void
+    {
+        $recipients = config('mail.admin_recipients', []);
+
+        if (empty($recipients)) {
+            return;
+        }
+
+        try {
+            $userName = auth()->user()?->full_name ?? auth()->user()?->name;
+
+            Mail::to($recipients)->send(new ProductSentMail(
+                product: $product,
+                action: $action,
+                userName: $userName,
+                wcProductId: $wcProductId,
+            ));
+        } catch (\Throwable $e) {
+            Log::error("ProductSentMail failed for product {$product->id}: {$e->getMessage()}");
+        }
     }
 
     private function createVersion(Product $product, string $changeType, string $changeDescription): void
